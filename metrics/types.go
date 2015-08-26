@@ -52,9 +52,10 @@ func (self MetricType) shortForm() string {
 // Hawkular-Metrics external structs
 
 type MetricHeader struct {
-	Type MetricType  `json:"-"`
-	Id   string      `json:"id"`
-	Data []Datapoint `json:"data"`
+	Tenant string      `json:"-"`
+	Type   MetricType  `json:"-"`
+	Id     string      `json:"id"`
+	Data   []Datapoint `json:"data"`
 }
 
 // Value should be convertible to float64 for numeric values
@@ -70,8 +71,14 @@ type HawkularError struct {
 }
 
 type MetricDefinition struct {
+	Tenant        string            `json:"-"`
 	Type          MetricType        `json:"-"`
 	Id            string            `json:"id"`
 	Tags          map[string]string `json:"tags,omitempty"`
 	RetentionTime int               `json:"dataRetention,omitempty"`
+}
+
+type SortKey struct {
+	Tenant string
+	Type   MetricType
 }

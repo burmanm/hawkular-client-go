@@ -8,9 +8,12 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"time"
 )
+
+// All the methods should accept optional tenant..
 
 // TODO: Add statistics support? Error metrics (connection errors, request errors), request metrics:
 // totals, request rate? mean time, avg time, max, min, percentiles etc.. ? And clear metrics..
@@ -45,6 +48,82 @@ type Client struct {
 	client *http.Client
 }
 
+type HawkularClient interface {
+	Send(*http.Request) (*http.Response, error)
+}
+
+type HawkularClientFunc func(*http.Request) (*http.Response, error)
+
+func (h HawkularClientFunc) Send(r *http.Request) (*http.Response, error) {
+	return h(r)
+}
+
+type Options func(HawkularClient) HawkularClient
+
+// Override function to replace the Tenant (defaults to Client default)
+func Tenant(tenant string) Options {
+	return func(h HawkularClient) HawkularClient {
+		return HawkularClientFunc(func(r *http.Request) (*http.Response, error) {
+			r.Header.Set("Hawkular-Tenant", tenant)
+			return h.Send(r)
+		})
+	}
+}
+
+// Add payload?
+func Payload(data interface{}) Options {
+	return func(h HawkularClient) HawkularClient {
+		return HawkularClientFunc(func(r *http.Request) (*http.Response, error) {
+			jsonb, err := json.Marshal(&data)
+			if err != nil {
+				return nil, err
+			}
+
+			b := bytes.NewBuffer(json)
+
+			rc, ok := b.(io.ReadCloser)
+			if !ok && b != nil {
+				rc = ioutil.NopCloser(b)
+			}
+
+			r.Body = rc
+			// Set payload here to the rc?
+			return h.Send(r)
+		})
+	}
+}
+
+type Request func(r *http.Request)
+
+func Command(req Request) Options {
+	return func(h HawkularClient) HawkularClient {
+		return HawkularClientFunc(func(r *http.Request) (*http.Response, error) {
+			// Commands take input Commands which set the URL!
+			req(r)
+			return h.Send(r)
+		})
+	}
+}
+
+func (self *Client) CreateDefinition(t MetricType) Request {
+	return func(r *http.Request) {
+		r.URL = self.metricsUrl(t) // Maybe this should only set the Opaque part and leave host for eg. RR?
+		r.Method = "POST"
+	}
+}
+
+/*
+c.Send(Tenant("projectId"),
+	Command(Definitions(Gauge))) // Command would add URL?
+
+c.Send(Tenant("projectId"),
+	Command(Create()),
+	Payload(md))
+*/
+
+// TODO Instrumentation? To get statistics?
+// TODO Authorization / Authentication ?
+
 func NewHawkularClient(p Parameters) (*Client, error) {
 	if p.Path == "" {
 		p.Path = base_url
@@ -68,11 +147,7 @@ func NewHawkularClient(p Parameters) (*Client, error) {
 // Creates a new metric, and returns true if creation succeeded, false if not (metric was already created).
 // err is returned only in case of another error than 'metric already created'
 func (self *Client) Create(md MetricDefinition) (bool, error) {
-	jsonb, err := json.Marshal(&md)
-	if err != nil {
-		return false, err
-	}
-	err = self.post(self.metricsUrl(md.Type), jsonb)
+	_, err := self.process(self.metricsUrl(md.Type), "POST", md)
 	if err != nil {
 		if err, ok := err.(*HawkularClientError); ok {
 			if err.Code != http.StatusConflict {
@@ -95,7 +170,7 @@ func (self *Client) Definitions(t MetricType) ([]*MetricDefinition, error) {
 	if err != nil {
 		return nil, err
 	}
-	b, err := self.get(url)
+	b, err := self.process(url, "GET", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +193,7 @@ func (self *Client) Definitions(t MetricType) ([]*MetricDefinition, error) {
 func (self *Client) Definition(t MetricType, id string) (*MetricDefinition, error) {
 	url := self.singleMetricsUrl(t, id)
 
-	b, err := self.get(url)
+	b, err := self.process(url, "GET", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -133,10 +208,12 @@ func (self *Client) Definition(t MetricType, id string) (*MetricDefinition, erro
 	return &md, nil
 }
 
+// Tags methods should return tenant also
+
 // Fetch metric definition tags
 func (self *Client) Tags(t MetricType, id string) (*map[string]string, error) {
 	id_url := self.cleanId(id)
-	b, err := self.get(self.tagsUrl(t, id_url))
+	b, err := self.process(self.tagsUrl(t, id_url), "GET", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -156,11 +233,8 @@ func (self *Client) Tags(t MetricType, id string) (*map[string]string, error) {
 // TODO: Should this be "ReplaceTags" etc?
 func (self *Client) UpdateTags(t MetricType, id string, tags map[string]string) error {
 	id_url := self.cleanId(id)
-	b, err := json.Marshal(tags)
-	if err != nil {
-		return err
-	}
-	return self.put(self.tagsUrl(t, id_url), b)
+	_, err := self.process(self.tagsUrl(t, id_url), "PUT", tags)
+	return err
 }
 
 // Delete given tags from the definition
@@ -173,7 +247,8 @@ func (self *Client) DeleteTags(t MetricType, id_str string, deleted map[string]s
 	j := strings.Join(tags, ",")
 	u := self.tagsUrl(t, id)
 	self.addToUrl(u, j)
-	return self.del(u)
+	_, err := self.process(u, "DELETE", nil)
+	return err
 }
 
 // Take input of single Metric instance. If Timestamp is not defined, use current time
@@ -209,7 +284,7 @@ func (self *Client) SingleGaugeMetric(id string, options map[string]string) ([]*
 	if err != nil {
 		return nil, err
 	}
-	b, err := self.get(url)
+	b, err := self.process(url, "GET", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -231,40 +306,40 @@ func (self *Client) SingleGaugeMetric(id string, options map[string]string) ([]*
 // For now supports only single metricType per request
 func (self *Client) Write(metrics []MetricHeader) error {
 	if len(metrics) > 0 {
+		// Should be sorted and splitted by type & tenant..
 		metricType := metrics[0].Type // Temp solution
 		if err := metricType.validate(); err != nil {
 			return err
 		}
 
-		jsonb, err := json.Marshal(&metrics)
+		// This will be buggy, we're sending []metrics.MetricHeader to the tenant() function..
+		_, err := self.process(self.dataUrl(self.metricsUrl(metricType)), "POST", metrics)
 		if err != nil {
 			return err
 		}
-		return self.post(self.dataUrl(self.metricsUrl(metricType)), jsonb)
 	}
 	return nil
 }
 
+func (self *Client) sortMetrics(metrics []MetricHeader) (map[*SortKey][]MetricHeader, error) {
+	// First-key = tenant-type ?
+	// Second key the MetricHeaders..
+
+	m := make(map[*SortKey][]MetricHeader)
+
+	// Create map..
+	for _, v := range metrics {
+		s := &SortKey{Tenant: v.Tenant, Type: v.Type}
+		if m[s] == nil {
+			m[s] = make([]MetricHeader, 0)
+		}
+		m[s] = append(m[s], v)
+	}
+
+	return m, nil
+}
+
 // HTTP Helper functions
-
-func (self *Client) get(url *url.URL) ([]byte, error) {
-	return self.send(url, "GET", nil)
-}
-
-func (self *Client) post(url *url.URL, json []byte) error {
-	_, err := self.send(url, "POST", json)
-	return err
-}
-
-func (self *Client) put(url *url.URL, json []byte) error {
-	_, err := self.send(url, "PUT", json)
-	return err
-}
-
-func (self *Client) del(url *url.URL) error {
-	_, err := self.send(url, "DELETE", nil)
-	return err
-}
 
 func (self *Client) cleanId(id string) string {
 	return url.QueryEscape(id)
@@ -301,12 +376,26 @@ func (self *Client) newRequest(url *url.URL, method string, body io.Reader) (*ht
 	return req, nil
 }
 
-func (self *Client) send(url *url.URL, method string, json []byte) ([]byte, error) {
+// Helper function that transforms struct to json and fetches the correct tenant information
+// TODO: Try the decorator pattern to replace all these simple functions?
+func (self *Client) process(url *url.URL, method string, data interface{}) ([]byte, error) {
+	jsonb, err := json.Marshal(&data)
+	if err != nil {
+		return nil, err
+	}
+	return self.send(url, method, jsonb, self.tenant(data))
+}
+
+func (self *Client) send(url *url.URL, method string, json []byte, tenant string) ([]byte, error) {
 	// Have to replicate http.NewRequest here to avoid calling of url.Parse,
 	// which has a bug when it comes to encoded url
 	req, _ := self.newRequest(url, method, bytes.NewBuffer(json))
 	req.Header.Add("Content-Type", "application/json")
-	req.Header.Add("Hawkular-Tenant", self.Tenant)
+	if len(tenant) > 0 {
+		req.Header.Add("Hawkular-Tenant", tenant)
+	} else {
+		req.Header.Add("Hawkular-Tenant", self.Tenant)
+	}
 	resp, err := self.client.Do(req)
 
 	if err != nil {
@@ -386,4 +475,25 @@ func (self *Client) paramUrl(u *url.URL, options map[string]string) (*url.URL, e
 
 	u.RawQuery = q.Encode()
 	return u, nil
+}
+
+// If struct has Tenant defined, return it otherwise return self.Tenant
+func (self *Client) tenant(i interface{}) string {
+	r := reflect.ValueOf(i)
+
+	if r.Kind() == reflect.Ptr {
+		r = r.Elem()
+	}
+
+	if r.Kind() == reflect.Slice {
+		r = r.Index(0)
+	}
+
+	if r.Kind() == reflect.Struct {
+		v := r.FieldByName("Tenant")
+		if v.Kind() == reflect.String && len(v.String()) > 0 {
+			return v.String()
+		}
+	}
+	return self.Tenant
 }

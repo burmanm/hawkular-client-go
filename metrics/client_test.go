@@ -15,7 +15,7 @@ func integrationClient() (*Client, error) {
 		return nil, err
 	}
 	// p := Parameters{Tenant: t, Host: "localhost:8080", Path: "hawkular/metrics"}
-	p := Parameters{Tenant: t, Host: "localhost:8080"}
+	p := Parameters{Tenant: t, Host: "localhost:8180"}
 	// p := Parameters{Tenant: t, Host: "209.132.178.218:18080"}
 	return NewHawkularClient(p)
 }
@@ -224,4 +224,32 @@ func TestCheckErrors(t *testing.T) {
 	assert.NotNil(t, err, "Invalid non-float value should not be accepted")
 	_, err = c.SingleGaugeMetric("test.not.existing", make(map[string]string))
 	assert.Nil(t, err, "Querying empty metric should not generate an error")
+}
+
+func TestTenantFetching(t *testing.T) {
+	c, err := integrationClient()
+	assert.Nil(t, err)
+
+	// Test struct that does have Tenant defined
+	mh := MetricHeader{
+		Id:   "test.fetching.tenant.1",
+		Type: Counter,
+		Data: []Datapoint{},
+	}
+	assert.Equal(t, c.Tenant, c.tenant(mh))
+
+	other := "my.other.tenant"
+	mh.Tenant = other
+	assert.Equal(t, other, c.tenant(mh))
+
+	// Check also pointer access
+	assert.Equal(t, other, c.tenant(&mh))
+
+	// Test struct that doesn't have Tenant defined, should return self.Tenant
+	d := &Datapoint{
+		Timestamp: time.Now().Unix(),
+		Value:     float64(1.45),
+	}
+	assert.Equal(t, c.Tenant, c.tenant(d))
+
 }
