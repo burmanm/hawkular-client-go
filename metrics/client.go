@@ -37,7 +37,7 @@ const (
 )
 
 type Parameters struct {
-	Tenant string
+	Tenant string // Technically optional, but requires setting Tenant() option everytime
 	Host   string
 	Path   string // Optional
 }
@@ -54,6 +54,7 @@ type HawkularClient interface {
 
 type HawkularClientFunc func(*http.Request) (*http.Response, error)
 
+// The point of this?
 func (h HawkularClientFunc) Send(r *http.Request) (*http.Response, error) {
 	return h(r)
 }
@@ -70,55 +71,163 @@ func Tenant(tenant string) Options {
 	}
 }
 
-// Add payload?
-func Payload(data interface{}) Options {
+// Add payload to the request
+func Data(data interface{}) Options {
 	return func(h HawkularClient) HawkularClient {
 		return HawkularClientFunc(func(r *http.Request) (*http.Response, error) {
-			jsonb, err := json.Marshal(&data)
+			jsonb, err := json.Marshal(data)
 			if err != nil {
 				return nil, err
 			}
 
-			b := bytes.NewBuffer(json)
-
-			rc, ok := b.(io.ReadCloser)
-			if !ok && b != nil {
-				rc = ioutil.NopCloser(b)
-			}
-
+			b := bytes.NewBuffer(jsonb)
+			rc := ioutil.NopCloser(b)
 			r.Body = rc
-			// Set payload here to the rc?
+
 			return h.Send(r)
 		})
 	}
 }
 
-type Request func(r *http.Request)
+// type Request func(r *http.Request)
 
-func Command(req Request) Options {
+// func Command(req Request) Options {
+// 	return func(h HawkularClient) HawkularClient {
+// 		return HawkularClientFunc(func(r *http.Request) (*http.Response, error) {
+// 			// Commands take input Commands which set the URL!
+// 			req(r)
+// 			return h.Send(r)
+// 		})
+// 	}
+// }
+
+// Create new Definition
+func (self *Client) CreateDefinition(md MetricDefinition, o ...Options) (bool, error) {
+	c := func(h HawkularClient) HawkularClient {
+		return HawkularClientFunc(func(r *http.Request) (*http.Response, error) {
+			r.URL = self.metricsUrl(md.Type)
+			r.Method = "POST"
+			return h.Send(r)
+		})
+	}
+
+	// The c must be the first function, not the Options!
+	// No prepend?
+	o = append(o, c, Data(md))
+
+	_, _ = self.Send(o...)
+
+	return false, nil
+}
+
+type Filter func(r *http.Request)
+
+func Filters(f ...Filter) Options {
 	return func(h HawkularClient) HawkularClient {
 		return HawkularClientFunc(func(r *http.Request) (*http.Response, error) {
-			// Commands take input Commands which set the URL!
-			req(r)
+			for _, filter := range f {
+				filter(r)
+			}
 			return h.Send(r)
 		})
 	}
 }
 
-func (self *Client) CreateDefinition(t MetricType) Request {
-	return func(r *http.Request) {
-		r.URL = self.metricsUrl(t) // Maybe this should only set the Opaque part and leave host for eg. RR?
-		r.Method = "POST"
+// Fetch definitions, requires HWKMETRICS-232
+func (self *Client) GetDefinitions(o ...Options) []MetricDefinition {
+	c := func(h HawkularClient) HawkularClient {
+		return HawkularClientFunc(func(r *http.Request) (*http.Response, error) {
+			r.Method = "GET"
+			r.URL = self.metricsUrl(Generic)
+			return h.Send(r)
+		})
 	}
+
+	o = append(o, c)
+
+	_, _ = self.Send(o...)
+	// b, err := c.Send(c, o)
+	// json unmarshal to MetricDefinitions and return
+	return nil
+}
+
+func TypeFilter(t MetricType) Filter {
+	return func(r *http.Request) {
+		// Add type=? to the query
+	}
+}
+
+func TagsFilter(t map[string]string) Filter {
+	return func(r *http.Request) {
+		// Add tags=? to the query
+		tags := make([]string, 0, len(t))
+		for k, v := range t {
+			tags = append(tags, fmt.Sprintf("%s:%s", k, v))
+		}
+		_ = strings.Join(tags, ",") // Add this
+	}
+}
+
+// The SEND method..
+
+func (self *Client) createRequest() *http.Request {
+	req := &http.Request{
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     make(http.Header),
+		Host:       self.url.Host,
+	}
+	req.Header.Add("Content-Type", "application/json")
+	return req
+}
+
+func (self *Client) Send(o ...Options) ([]byte, error) {
+	// Initialize
+	r := self.createRequest()
+
+	// This needs more work
+	// for _, f := range o {
+	// 	f(r)
+	// }
+
+	// if body != nil {
+	// 	switch v := body.(type) {
+	// 	case *bytes.Buffer:
+	// 		req.ContentLength = int64(v.Len())
+	// 	case *bytes.Reader:
+	// 		req.ContentLength = int64(v.Len())
+	// 	case *strings.Reader:
+	// 		req.ContentLength = int64(v.Len())
+	// 	}
+	// }
+	return nil, nil
 }
 
 /*
+c.CreateDefinition(Type(Gauge)) // Nope.. can't be a filter & option at the same time.. blaah
+c.CreateDefinition(Type(Gauge), Data(md)) // Why not just gauge, md? Right.. Tenants..
+
+What if all of these take ... ?
+
 c.Send(Tenant("projectId"),
 	Command(Definitions(Gauge))) // Command would add URL?
 
+c.Send(Command(CreateDefinition(Gauge)),
+       Data(md))
+
+c.Send(Command(GetDefinitions(Type(Gauge), Tags(t)))) // How to set return type? Do I still need those for certain?
+
+c.Definitions(Tenant("projectId"), Type(Gauge), Tags(t)) ? // Is this possible? No
+
 c.Send(Tenant("projectId"),
-	Command(Create()),
-	Payload(md))
+       Command(Create()),
+       Data(md))
+*/
+
+/*
+c.Get(Tenant("projectId"),
+      FetchCommand(func(req, res))) ? // No, I'll need to separate the runs.. ugh. Well, actually.. I'll need the metadata from the query itself. Do I need a struct that contains the info?
 */
 
 // TODO Instrumentation? To get statistics?
@@ -166,10 +275,8 @@ func (self *Client) Create(md MetricDefinition) (bool, error) {
 func (self *Client) Definitions(t MetricType) ([]*MetricDefinition, error) {
 	q := make(map[string]string)
 	q["type"] = t.shortForm()
-	url, err := self.paramUrl(self.metricsUrl(Generic), q)
-	if err != nil {
-		return nil, err
-	}
+	url := self.paramUrl(self.metricsUrl(Generic), q)
+
 	b, err := self.process(url, "GET", nil)
 	if err != nil {
 		return nil, err
@@ -279,11 +386,8 @@ func (self *Client) PushSingleGaugeMetric(id string, m Datapoint) error {
 // TODO: Remove and replace with better Read properties? Perhaps with iterators?
 func (self *Client) SingleGaugeMetric(id string, options map[string]string) ([]*Datapoint, error) {
 	id = self.cleanId(id)
-	url, err := self.paramUrl(self.dataUrl(self.singleMetricsUrl(Gauge, id)), options)
+	url := self.paramUrl(self.dataUrl(self.singleMetricsUrl(Gauge, id)), options)
 
-	if err != nil {
-		return nil, err
-	}
 	b, err := self.process(url, "GET", nil)
 	if err != nil {
 		return nil, err
@@ -301,16 +405,16 @@ func (self *Client) SingleGaugeMetric(id string, options map[string]string) ([]*
 }
 
 // func (self *Client) QueryGaugesWithTags(id string, tags map[string]string) ([]MetricDefinition, error) {
-
-// Write using mixedmultimetrics
-// For now supports only single metricType per request
-func (self *Client) Write(metrics []MetricHeader) error {
+func (self *Client) Write(metrics []MetricHeader, o ...Options) error {
 	if len(metrics) > 0 {
 		// Should be sorted and splitted by type & tenant..
 		metricType := metrics[0].Type // Temp solution
 		if err := metricType.validate(); err != nil {
 			return err
 		}
+
+		// i := self.Send(Command(Write(metricType)), Data(metrics), o)
+		// if i.([]MetricHeader) .. etc..
 
 		// This will be buggy, we're sending []metrics.MetricHeader to the tenant() function..
 		_, err := self.process(self.dataUrl(self.metricsUrl(metricType)), "POST", metrics)
@@ -467,14 +571,14 @@ func (self *Client) addToUrl(u *url.URL, s string) *url.URL {
 	return u
 }
 
-func (self *Client) paramUrl(u *url.URL, options map[string]string) (*url.URL, error) {
+func (self *Client) paramUrl(u *url.URL, options map[string]string) *url.URL {
 	q := u.Query()
 	for k, v := range options {
 		q.Set(k, v)
 	}
 
 	u.RawQuery = q.Encode()
-	return u, nil
+	return u
 }
 
 // If struct has Tenant defined, return it otherwise return self.Tenant

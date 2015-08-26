@@ -49,7 +49,13 @@ func (self MetricType) shortForm() string {
 	return shortForm[self]
 }
 
+type SortKey struct {
+	Tenant string
+	Type   MetricType
+}
+
 // Hawkular-Metrics external structs
+// Do I need external.. hmph.
 
 type MetricHeader struct {
 	Tenant string      `json:"-"`
@@ -72,13 +78,8 @@ type HawkularError struct {
 
 type MetricDefinition struct {
 	Tenant        string            `json:"-"`
-	Type          MetricType        `json:"-"`
+	Type          MetricType        `json:"type,omitempty"`
 	Id            string            `json:"id"`
 	Tags          map[string]string `json:"tags,omitempty"`
 	RetentionTime int               `json:"dataRetention,omitempty"`
-}
-
-type SortKey struct {
-	Tenant string
-	Type   MetricType
 }

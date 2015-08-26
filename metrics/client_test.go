@@ -31,6 +31,18 @@ func randomString() (string, error) {
 func createError(err error) {
 }
 
+func TestNewBehavior(t *testing.T) {
+	c, err := integrationClient()
+	assert.Nil(t, err)
+
+	// c.Send(CreateDefinition(), Data(md))
+	// Vai?
+	// c.Create(md, Tenant("projectId")) // Better?
+
+	mds := c.GetDefinitions(Filters(TypeFilter(Gauge)))
+	assert.Nil(t, mds)
+}
+
 func TestCreate(t *testing.T) {
 	c, err := integrationClient()
 	assert.Nil(t, err)
