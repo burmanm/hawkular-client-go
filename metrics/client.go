@@ -13,8 +13,6 @@ import (
 	"time"
 )
 
-// All the methods should accept optional tenant..
-
 // TODO: Add statistics support? Error metrics (connection errors, request errors), request metrics:
 // totals, request rate? mean time, avg time, max, min, percentiles etc.. ? And clear metrics..
 // Stateful metrics? Kinda like Counters.Inc(..) ?
@@ -39,7 +37,7 @@ const (
 type Parameters struct {
 	Tenant string // Technically optional, but requires setting Tenant() option everytime
 	Host   string
-	Path   string // Optional
+	Path   string // Modifieral
 }
 
 type Client struct {
@@ -52,120 +50,70 @@ type HawkularClient interface {
 	Send(*http.Request) (*http.Response, error)
 }
 
-type HawkularClientFunc func(*http.Request) (*http.Response, error)
+// Modifiers
 
-// The point of this?
-func (h HawkularClientFunc) Send(r *http.Request) (*http.Response, error) {
-	return h(r)
-}
-
-type Options func(HawkularClient) HawkularClient
+type Modifier func(*http.Request) error
 
 // Override function to replace the Tenant (defaults to Client default)
-func Tenant(tenant string) Options {
-	return func(h HawkularClient) HawkularClient {
-		return HawkularClientFunc(func(r *http.Request) (*http.Response, error) {
-			r.Header.Set("Hawkular-Tenant", tenant)
-			return h.Send(r)
-		})
+func Tenant(tenant string) Modifier {
+	return func(r *http.Request) error {
+		r.Header.Set("Hawkular-Tenant", tenant)
+		return nil
 	}
 }
 
 // Add payload to the request
-func Data(data interface{}) Options {
-	return func(h HawkularClient) HawkularClient {
-		return HawkularClientFunc(func(r *http.Request) (*http.Response, error) {
-			jsonb, err := json.Marshal(data)
-			if err != nil {
-				return nil, err
-			}
+func Data(data interface{}) Modifier {
+	return func(r *http.Request) error {
+		jsonb, err := json.Marshal(data)
+		if err != nil {
+			return err
+		}
 
-			b := bytes.NewBuffer(jsonb)
-			rc := ioutil.NopCloser(b)
-			r.Body = rc
+		b := bytes.NewBuffer(jsonb)
+		rc := ioutil.NopCloser(b)
+		r.Body = rc
 
-			return h.Send(r)
-		})
+		if b != nil {
+			r.ContentLength = int64(b.Len())
+		}
+		return nil
 	}
 }
 
-// type Request func(r *http.Request)
-
-// func Command(req Request) Options {
-// 	return func(h HawkularClient) HawkularClient {
-// 		return HawkularClientFunc(func(r *http.Request) (*http.Response, error) {
-// 			// Commands take input Commands which set the URL!
-// 			req(r)
-// 			return h.Send(r)
-// 		})
-// 	}
-// }
-
-// Create new Definition
-func (self *Client) CreateDefinition(md MetricDefinition, o ...Options) (bool, error) {
-	c := func(h HawkularClient) HawkularClient {
-		return HawkularClientFunc(func(r *http.Request) (*http.Response, error) {
-			r.URL = self.metricsUrl(md.Type)
-			r.Method = "POST"
-			return h.Send(r)
-		})
-	}
-
-	// The c must be the first function, not the Options!
-	// No prepend?
-	o = append(o, c, Data(md))
-
-	_, _ = self.Send(o...)
-
-	return false, nil
-}
+// Filters for querying
 
 type Filter func(r *http.Request)
 
-func Filters(f ...Filter) Options {
-	return func(h HawkularClient) HawkularClient {
-		return HawkularClientFunc(func(r *http.Request) (*http.Response, error) {
-			for _, filter := range f {
-				filter(r)
-			}
-			return h.Send(r)
-		})
+func Filters(f ...Filter) Modifier {
+	return func(r *http.Request) error {
+		for _, filter := range f {
+			filter(r)
+		}
+		return nil // Or should filter return err?
 	}
 }
 
-// Fetch definitions, requires HWKMETRICS-232
-func (self *Client) GetDefinitions(o ...Options) []MetricDefinition {
-	c := func(h HawkularClient) HawkularClient {
-		return HawkularClientFunc(func(r *http.Request) (*http.Response, error) {
-			r.Method = "GET"
-			r.URL = self.metricsUrl(Generic)
-			return h.Send(r)
-		})
+// Add query parameters
+func Param(k string, v string) Filter {
+	return func(r *http.Request) {
+		q := r.URL.Query()
+		q.Set(k, v)
+		r.URL.RawQuery = q.Encode()
 	}
-
-	o = append(o, c)
-
-	_, _ = self.Send(o...)
-	// b, err := c.Send(c, o)
-	// json unmarshal to MetricDefinitions and return
-	return nil
 }
 
 func TypeFilter(t MetricType) Filter {
-	return func(r *http.Request) {
-		// Add type=? to the query
-	}
+	return Param("type", t.shortForm())
 }
 
 func TagsFilter(t map[string]string) Filter {
-	return func(r *http.Request) {
-		// Add tags=? to the query
-		tags := make([]string, 0, len(t))
-		for k, v := range t {
-			tags = append(tags, fmt.Sprintf("%s:%s", k, v))
-		}
-		_ = strings.Join(tags, ",") // Add this
+	tags := make([]string, 0, len(t))
+	for k, v := range t {
+		tags = append(tags, fmt.Sprintf("%s:%s", k, v))
 	}
+	j := strings.Join(tags, ",") // Add this
+	return Param("tags", j)
 }
 
 // The SEND method..
@@ -179,29 +127,63 @@ func (self *Client) createRequest() *http.Request {
 		Host:       self.url.Host,
 	}
 	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Hawkular-Tenant", self.Tenant)
 	return req
 }
 
-func (self *Client) Send(o ...Options) ([]byte, error) {
+func (self *Client) Send(o ...Modifier) (*http.Response, error) {
 	// Initialize
 	r := self.createRequest()
 
-	// This needs more work
-	// for _, f := range o {
-	// 	f(r)
-	// }
+	// Run all the modifiers
+	for _, f := range o {
+		err := f(r)
+		if err != nil {
+			return nil, err
+		}
+	}
 
-	// if body != nil {
-	// 	switch v := body.(type) {
-	// 	case *bytes.Buffer:
-	// 		req.ContentLength = int64(v.Len())
-	// 	case *bytes.Reader:
-	// 		req.ContentLength = int64(v.Len())
-	// 	case *strings.Reader:
-	// 		req.ContentLength = int64(v.Len())
-	// 	}
-	// }
-	return nil, nil
+	return self.client.Do(r)
+}
+
+// Commands
+
+// Create new Definition
+func (self *Client) CreateDefinition(md MetricDefinition, o ...Modifier) (bool, error) {
+	c := func(r *http.Request) error {
+		r.URL = self.metricsUrl(md.Type)
+		r.Method = "POST"
+		return nil
+	}
+
+	// Keep the order, add custom prepend function?
+
+	params := make([]Modifier, 0, len(o)+2)
+	params = append(params, c, Data(md))
+
+	for _, opt := range o {
+		params = append(params, opt)
+	}
+
+	self.Send(params...)
+
+	return false, nil
+}
+
+// Fetch definitions
+func (self *Client) GetDefinitions(o ...Modifier) []MetricDefinition {
+	c := func(r *http.Request) error {
+		r.Method = "GET"
+		r.URL = self.metricsUrl(Generic)
+		return nil
+	}
+
+	o = append(o, c)
+
+	_, _ = self.Send(o...)
+	// b, err := c.Send(c, o)
+	// json unmarshal to MetricDefinitions and return
+	return nil
 }
 
 /*
@@ -405,7 +387,7 @@ func (self *Client) SingleGaugeMetric(id string, options map[string]string) ([]*
 }
 
 // func (self *Client) QueryGaugesWithTags(id string, tags map[string]string) ([]MetricDefinition, error) {
-func (self *Client) Write(metrics []MetricHeader, o ...Options) error {
+func (self *Client) Write(metrics []MetricHeader, o ...Modifier) error {
 	if len(metrics) > 0 {
 		// Should be sorted and splitted by type & tenant..
 		metricType := metrics[0].Type // Temp solution
