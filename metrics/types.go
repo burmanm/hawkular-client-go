@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"encoding/json"
 	"fmt"
 )
 
@@ -47,6 +48,30 @@ func (self MetricType) shortForm() string {
 		return "unknown"
 	}
 	return shortForm[self]
+}
+
+// Custom unmarshaller
+func (self *MetricType) UnmarshalJSON(b []byte) error {
+	var f interface{}
+	err := json.Unmarshal(b, &f)
+	if err != nil {
+		return err
+	}
+
+	if str, ok := f.(string); ok {
+		for i, v := range shortForm {
+			if str == v {
+				*self = MetricType(i)
+				break
+			}
+		}
+	}
+
+	return nil
+}
+
+func (self MetricType) MarshalJSON() ([]byte, error) {
+	return json.Marshal(self.String())
 }
 
 type SortKey struct {

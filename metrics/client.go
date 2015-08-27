@@ -13,9 +13,8 @@ import (
 	"time"
 )
 
-// TODO: Add statistics support? Error metrics (connection errors, request errors), request metrics:
-// totals, request rate? mean time, avg time, max, min, percentiles etc.. ? And clear metrics..
-// Stateful metrics? Kinda like Counters.Inc(..) ?
+// TODO Instrumentation? To get statistics?
+// TODO Authorization / Authentication ?
 
 // More detailed error
 
@@ -81,6 +80,15 @@ func Data(data interface{}) Modifier {
 	}
 }
 
+func (self *Client) MetricsUrl(method string, mt MetricType) Modifier {
+	// TODO Create composite URLs? Add().Add().. etc? Easier to modify on the fly..
+	return func(r *http.Request) error {
+		r.URL = self.metricsUrl(mt)
+		r.Method = method
+		return nil
+	}
+}
+
 // Filters for querying
 
 type Filter func(r *http.Request)
@@ -116,6 +124,11 @@ func TagsFilter(t map[string]string) Filter {
 	return Param("tags", j)
 }
 
+// Requires HWKMETRICS-233
+func IdFilter(regexp string) Filter {
+	return Param("id", regexp)
+}
+
 // The SEND method..
 
 func (self *Client) createRequest() *http.Request {
@@ -149,71 +162,68 @@ func (self *Client) Send(o ...Modifier) (*http.Response, error) {
 // Commands
 
 // Create new Definition
-func (self *Client) CreateDefinition(md MetricDefinition, o ...Modifier) (bool, error) {
-	c := func(r *http.Request) error {
-		r.URL = self.metricsUrl(md.Type)
-		r.Method = "POST"
-		return nil
-	}
-
-	// Keep the order, add custom prepend function?
-
+func (self *Client) Create(md MetricDefinition, o ...Modifier) (bool, error) {
+	// Keep the order, add custom prepend
 	params := make([]Modifier, 0, len(o)+2)
-	params = append(params, c, Data(md))
+	params = append(params, self.MetricsUrl("POST", md.Type), Data(md))
+	params = append(params, o...)
 
-	for _, opt := range o {
-		params = append(params, opt)
+	r, err := self.Send(params...)
+	if err != nil {
+		return false, err
 	}
 
-	self.Send(params...)
+	defer r.Body.Close()
 
-	return false, nil
+	if r.StatusCode > 399 {
+		err = self.parseErrorResponse(r)
+		if err, ok := err.(*HawkularClientError); ok {
+			if err.Code != http.StatusConflict {
+				return false, err
+			} else {
+				return false, nil
+			}
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // Fetch definitions
-func (self *Client) GetDefinitions(o ...Modifier) []MetricDefinition {
-	c := func(r *http.Request) error {
-		r.Method = "GET"
-		r.URL = self.metricsUrl(Generic)
-		return nil
+func (self *Client) Definitions(o ...Modifier) ([]*MetricDefinition, error) {
+	params := make([]Modifier, 0, len(o)+1)
+	params = append(params, self.MetricsUrl("GET", Generic))
+	params = append(params, o...)
+
+	r, err := self.Send(params...)
+	if err != nil {
+		return nil, err
 	}
 
-	o = append(o, c)
+	defer r.Body.Close()
 
-	_, _ = self.Send(o...)
-	// b, err := c.Send(c, o)
-	// json unmarshal to MetricDefinitions and return
-	return nil
+	if r.StatusCode == http.StatusOK {
+		b, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+		md := []*MetricDefinition{}
+		if b != nil {
+			if err = json.Unmarshal(b, &md); err != nil {
+				return nil, err
+			}
+		}
+		return md, err
+	} else if r.StatusCode > 399 {
+		return nil, self.parseErrorResponse(r)
+	} else {
+		return nil, nil // Nothing to answer..
+	}
+
+	return nil, nil
 }
 
-/*
-c.CreateDefinition(Type(Gauge)) // Nope.. can't be a filter & option at the same time.. blaah
-c.CreateDefinition(Type(Gauge), Data(md)) // Why not just gauge, md? Right.. Tenants..
-
-What if all of these take ... ?
-
-c.Send(Tenant("projectId"),
-	Command(Definitions(Gauge))) // Command would add URL?
-
-c.Send(Command(CreateDefinition(Gauge)),
-       Data(md))
-
-c.Send(Command(GetDefinitions(Type(Gauge), Tags(t)))) // How to set return type? Do I still need those for certain?
-
-c.Definitions(Tenant("projectId"), Type(Gauge), Tags(t)) ? // Is this possible? No
-
-c.Send(Tenant("projectId"),
-       Command(Create()),
-       Data(md))
-*/
-
-/*
-c.Get(Tenant("projectId"),
-      FetchCommand(func(req, res))) ? // No, I'll need to separate the runs.. ugh. Well, actually.. I'll need the metadata from the query itself. Do I need a struct that contains the info?
-*/
-
-// TODO Instrumentation? To get statistics?
-// TODO Authorization / Authentication ?
+// Initialization
 
 func NewHawkularClient(p Parameters) (*Client, error) {
 	if p.Path == "" {
@@ -234,49 +244,6 @@ func NewHawkularClient(p Parameters) (*Client, error) {
 }
 
 // Public functions
-
-// Creates a new metric, and returns true if creation succeeded, false if not (metric was already created).
-// err is returned only in case of another error than 'metric already created'
-func (self *Client) Create(md MetricDefinition) (bool, error) {
-	_, err := self.process(self.metricsUrl(md.Type), "POST", md)
-	if err != nil {
-		if err, ok := err.(*HawkularClientError); ok {
-			if err.Code != http.StatusConflict {
-				return false, err
-			} else {
-				return false, nil
-			}
-		}
-		return false, err
-	}
-	return true, nil
-
-}
-
-// Fetch metric definitions for one metric type
-func (self *Client) Definitions(t MetricType) ([]*MetricDefinition, error) {
-	q := make(map[string]string)
-	q["type"] = t.shortForm()
-	url := self.paramUrl(self.metricsUrl(Generic), q)
-
-	b, err := self.process(url, "GET", nil)
-	if err != nil {
-		return nil, err
-	}
-
-	md := []*MetricDefinition{}
-	if b != nil {
-		if err = json.Unmarshal(b, &md); err != nil {
-			return nil, err
-		}
-	}
-
-	for _, m := range md {
-		m.Type = t
-	}
-
-	return md, nil
-}
 
 // Return a single definition
 func (self *Client) Definition(t MetricType, id string) (*MetricDefinition, error) {

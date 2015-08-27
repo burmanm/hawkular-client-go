@@ -15,7 +15,7 @@ func integrationClient() (*Client, error) {
 		return nil, err
 	}
 	// p := Parameters{Tenant: t, Host: "localhost:8080", Path: "hawkular/metrics"}
-	p := Parameters{Tenant: t, Host: "localhost:8180"}
+	p := Parameters{Tenant: t, Host: "localhost:8080"}
 	// p := Parameters{Tenant: t, Host: "209.132.178.218:18080"}
 	return NewHawkularClient(p)
 }
@@ -31,16 +31,29 @@ func randomString() (string, error) {
 func createError(err error) {
 }
 
-func TestNewBehavior(t *testing.T) {
+func TestTenantModifier(t *testing.T) {
 	c, err := integrationClient()
 	assert.Nil(t, err)
 
-	// c.Send(CreateDefinition(), Data(md))
-	// Vai?
-	// c.Create(md, Tenant("projectId")) // Better?
+	ot, _ := randomString()
 
-	mds := c.GetDefinitions(Filters(TypeFilter(Gauge)))
+	// Create for another tenant
+	id := "test.metric.create.numeric.tenant.1"
+	md := MetricDefinition{Id: id, Type: Gauge}
+
+	ok, err := c.Create(md, Tenant(ot))
+	assert.Nil(t, err)
+	assert.True(t, ok, "MetricDefinition should have been created")
+
+	// Try to fetch from default tenant - should fail
+	mds, err := c.Definitions(Filters(TypeFilter(Gauge)))
+	assert.Nil(t, err)
 	assert.Nil(t, mds)
+
+	// Try to fetch from the given tenant - should succeed
+	mds, err = c.Definitions(Filters(TypeFilter(Gauge)), Tenant(ot))
+	assert.Nil(t, err)
+	assert.Equal(t, 1, len(mds))
 }
 
 func TestCreate(t *testing.T) {
@@ -53,7 +66,9 @@ func TestCreate(t *testing.T) {
 	assert.Nil(t, err)
 	assert.True(t, ok, "MetricDefinition should have been created")
 
-	// Commented out, see HWKMETRICS-110
+	// Following would be nice:
+	// mdd, err := c.Definitions(Filters(Type(Gauge), Id(id)))
+
 	// mdd, err := c.Definition(Gauge, id)
 	// assert.Nil(t, err)
 	// assert.Equal(t, md.Id, mdd.Id)
@@ -79,7 +94,7 @@ func TestCreate(t *testing.T) {
 	assert.Nil(t, err)
 
 	// Fetch all the previously created metrics and test equalities..
-	mdq, err := c.Definitions(Gauge)
+	mdq, err := c.Definitions(Filters(TypeFilter(Gauge)))
 	assert.Nil(t, err)
 	assert.Equal(t, 2, len(mdq), "Size of the returned gauge metrics does not match 2")
 
@@ -91,14 +106,14 @@ func TestCreate(t *testing.T) {
 	assert.Equal(t, md.Id, mdm[id].Id)
 	assert.True(t, reflect.DeepEqual(tags, mdm["test.metric.create.numeric.2"].Tags))
 
-	mda, err := c.Definitions(Availability)
+	mda, err := c.Definitions(Filters(TypeFilter(Availability)))
 	assert.Nil(t, err)
 	assert.Equal(t, 1, len(mda))
 	assert.Equal(t, "test/metric/create/availability/1", mda[0].Id)
 	assert.Equal(t, 12, mda[0].RetentionTime)
 
 	if mda[0].Type != Availability {
-		t.FailNow()
+		assert.FailNow(t, "Type did not match Availability", int(mda[0].Type))
 	}
 }
 
