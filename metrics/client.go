@@ -161,14 +161,19 @@ func (self *Client) Send(o ...Modifier) (*http.Response, error) {
 
 // Commands
 
+func prepend(slice []Modifier, a ...Modifier) []Modifier {
+	p := make([]Modifier, 0, len(slice)+len(a))
+	p = append(p, a...)
+	p = append(p, slice...)
+	return p
+}
+
 // Create new Definition
 func (self *Client) Create(md MetricDefinition, o ...Modifier) (bool, error) {
 	// Keep the order, add custom prepend
-	params := make([]Modifier, 0, len(o)+2)
-	params = append(params, self.MetricsUrl("POST", md.Type), Data(md))
-	params = append(params, o...)
+	o = prepend(o, self.MetricsUrl("POST", md.Type), Data(md))
 
-	r, err := self.Send(params...)
+	r, err := self.Send(o...)
 	if err != nil {
 		return false, err
 	}
@@ -191,11 +196,11 @@ func (self *Client) Create(md MetricDefinition, o ...Modifier) (bool, error) {
 
 // Fetch definitions
 func (self *Client) Definitions(o ...Modifier) ([]*MetricDefinition, error) {
-	params := make([]Modifier, 0, len(o)+1)
-	params = append(params, self.MetricsUrl("GET", Generic))
-	params = append(params, o...)
+	// TODO Feels silly to prepend URL in every occasion.. maybe it should be constructed
+	// instead?
+	o = prepend(o, self.MetricsUrl("GET", Generic))
 
-	r, err := self.Send(params...)
+	r, err := self.Send(o...)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +265,6 @@ func (self *Client) Definition(t MetricType, id string) (*MetricDefinition, erro
 			return nil, err
 		}
 	}
-	md.Type = t
 	return &md, nil
 }
 
@@ -353,7 +357,6 @@ func (self *Client) SingleGaugeMetric(id string, options map[string]string) ([]*
 
 }
 
-// func (self *Client) QueryGaugesWithTags(id string, tags map[string]string) ([]MetricDefinition, error) {
 func (self *Client) Write(metrics []MetricHeader, o ...Modifier) error {
 	if len(metrics) > 0 {
 		// Should be sorted and splitted by type & tenant..
@@ -362,10 +365,6 @@ func (self *Client) Write(metrics []MetricHeader, o ...Modifier) error {
 			return err
 		}
 
-		// i := self.Send(Command(Write(metricType)), Data(metrics), o)
-		// if i.([]MetricHeader) .. etc..
-
-		// This will be buggy, we're sending []metrics.MetricHeader to the tenant() function..
 		_, err := self.process(self.dataUrl(self.metricsUrl(metricType)), "POST", metrics)
 		if err != nil {
 			return err
