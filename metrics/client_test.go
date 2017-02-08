@@ -530,6 +530,17 @@ func TestQueryEscape(t *testing.T) {
 	assert.Equal(t, escapedCombination, "test%2Fwith%20whitespace%2Bplusses")
 }
 
+func TestStatusParsing(t *testing.T) {
+	c, err := integrationClient()
+	assert.NoError(t, err)
+
+	s, err := c.Status()
+	assert.NoError(t, err)
+
+	assert.True(t, s.Operational)
+	assert.NotEmpty(t, s.Version)
+}
+
 func getMetrics(prefix int) []MetricHeader {
 	points := 10
 	metrics := 100000

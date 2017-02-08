@@ -224,3 +224,12 @@ type TenantDefinition struct {
 	ID         string             `json:"id"`
 	Retentions map[MetricType]int `json:"retentions"`
 }
+
+// Status is a datatype that gives some information about the connected Hawkular-Metrics instance.
+// It is not a Hawkular-Metrics datatype
+type Status struct {
+	// Operational indicates if Hawkular-Metrics is ready to accept data
+	Operational bool
+	// Version is the version of the Hawkular-Metrics instance
+	Version string
+}

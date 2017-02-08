@@ -579,6 +579,54 @@ func (c *Client) ReadBuckets(t MetricType, o ...Modifier) ([]*Bucketpoint, error
 	return nil, nil
 }
 
+// Status returns the status of the Hawkular-Metrics. Returns an error if connection fails
+func (c *Client) Status(o ...Modifier) (*Status, error) {
+	o = prepend(o, c.URL("GET", StatusEndpoint()))
+
+	r, err := c.Send(o...)
+	if err != nil {
+		return nil, err
+	}
+
+	defer r.Body.Close()
+
+	if r.StatusCode == http.StatusOK {
+		b, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			return nil, err
+		}
+
+		var f interface{}
+		if b != nil {
+			if err = json.Unmarshal(b, &f); err != nil {
+				return nil, err
+			}
+		}
+
+		status := f.(map[string]interface{})
+
+		s := Status{
+			Operational: false,
+		}
+
+		if version, found := status["Implementation-Version"].(string); found {
+			s.Version = version
+		}
+
+		if up, found := status["MetricsService"].(string); found {
+			if up == "STARTED" {
+				s.Operational = true
+			}
+		}
+
+		return &s, nil
+	} else if r.StatusCode > 399 {
+		return nil, c.parseErrorResponse(r)
+	}
+
+	return nil, nil
+}
+
 // NewHawkularClient returns a new initialized instance of client
 func NewHawkularClient(p Parameters) (*Client, error) {
 	uri, err := url.Parse(p.Url)
@@ -746,6 +794,13 @@ func RawEndpoint() Endpoint {
 func StatsEndpoint() Endpoint {
 	return func(u *url.URL) {
 		addToURL(u, "stats")
+	}
+}
+
+// StatusEndpoint is for requesting the Hawkular-Metrics liveness
+func StatusEndpoint() Endpoint {
+	return func(u *url.URL) {
+		addToURL(u, "status")
 	}
 }
 
